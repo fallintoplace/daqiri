@@ -123,11 +123,13 @@ cd /tmp/dpdk-${DPDK_VERSION}
 
 # dmabuf.patch carries .mailmap and release-notes hunks that conflict on a
 # stock tarball; exclude them. dpdk.nvidia.patch applies cleanly.
-git apply \
+# `patch -p1` is used here (not `git apply`) because the extracted tarball
+# is not a git repository.
+patch -p1 \
     --exclude=.mailmap \
-    --exclude=doc/guides/rel_notes/release_26_03.rst \
-    "$OLDPWD/dpdk_patches/dmabuf.patch"
-git apply "$OLDPWD/dpdk_patches/dpdk.nvidia.patch"
+    --exclude='doc/guides/rel_notes/release_26_03.rst' \
+    < "$OLDPWD/dpdk_patches/dmabuf.patch"
+patch -p1 < "$OLDPWD/dpdk_patches/dpdk.nvidia.patch"
 ```
 
 ### 3.3 Configure, build, and install
@@ -205,17 +207,17 @@ The sections below explain each option you might want to flip from the default, 
 
 ### `CMAKE_CUDA_ARCHITECTURES` — GPU compute capability
 
-The CUDA architectures DAQIRI compiles for are currently hardcoded to `80;90;121` (A100, H100, GB10) at [`src/CMakeLists.txt:25`](https://github.com/NVIDIA/daqiri/blob/main/src/CMakeLists.txt). If your GPU is a different generation, or your installed CUDA Toolkit does not understand one of those architectures (most commonly `121` on older toolkits), override it on the CMake command line:
+The CUDA architectures DAQIRI compiles for are hardcoded to `80;90;121` (A100, H100, GB10) at [`src/CMakeLists.txt:25`](https://github.com/NVIDIA/daqiri/blob/main/src/CMakeLists.txt). Because that line is a plain `set()` (not a cache variable), **passing `-DCMAKE_CUDA_ARCHITECTURES=...` on the CMake command line is silently ignored** — the `set()` in `src/CMakeLists.txt` runs after CMake processes the command-line cache value and overwrites it within `src/`'s scope.
+
+To target a different GPU today you must edit the source line directly before running CMake:
 
 ```bash
-# Example: only build for Ada (sm_89, e.g. RTX 6000 Ada)
-cmake -S . -B build ... -DCMAKE_CUDA_ARCHITECTURES=89
-
-# Example: A100 + Ada + Hopper, skip GB10
-cmake -S . -B build ... -DCMAKE_CUDA_ARCHITECTURES="80;89;90"
+# Example: change src/CMakeLists.txt:25 to target Ada only (sm_89, RTX 6000 Ada)
+sed -i 's/set(CMAKE_CUDA_ARCHITECTURES "80;90;121")/set(CMAKE_CUDA_ARCHITECTURES "89")/' \
+    src/CMakeLists.txt
 ```
 
-The override works because `CMAKE_CUDA_ARCHITECTURES` is a standard CMake variable; the `set()` in `src/CMakeLists.txt` runs after the command-line cache value is established. Common values:
+Common values for the edit:
 
 | GPU family | Architecture |
 |---|---|
@@ -223,8 +225,14 @@ The override works because `CMAKE_CUDA_ARCHITECTURES` is a standard CMake variab
 | RTX 30xx, A40 | `86` |
 | RTX 40xx, RTX 6000 Ada, L40 | `89` |
 | H100, H200 | `90` |
+| Blackwell datacenter (RTX Pro 6000 Blackwell) | `100` |
 | GB10 (DGX Spark) | `121` |
-| Blackwell datacenter | `100` |
+
+!!! warning "Default list does not include sm_86, sm_89, or sm_100"
+
+    If your GPU is Ampere (RTX 30xx, A40), Ada (RTX 40xx, RTX 6000 Ada), or Blackwell (RTX Pro 6000 Blackwell), the default build will not contain native code for your card. The binary may still load via PTX JIT for some architectures but you should edit `src/CMakeLists.txt:25` to include the right `sm_*` value for production use.
+
+    Lifting this restriction (so `-DCMAKE_CUDA_ARCHITECTURES=...` actually works) is tracked as a follow-up on this tutorial's PR.
 
 ### Other flags
 
@@ -304,13 +312,14 @@ To run a real two-port loopback over a physical cable, continue with [Benchmarki
 
 ??? failure "`nvcc fatal: Unsupported gpu architecture 'compute_121'`"
 
-    The CUDA Toolkit on this host predates GB10 / Blackwell support. Either upgrade the toolkit, or pin `CMAKE_CUDA_ARCHITECTURES` to the architectures your toolkit understands:
+    The CUDA Toolkit on this host predates GB10 / Blackwell support. Because `CMAKE_CUDA_ARCHITECTURES` is currently hardcoded in `src/CMakeLists.txt`, you cannot fix this from the CMake command line — edit the source line directly:
 
     ```bash
-    cmake -S . -B build ... -DCMAKE_CUDA_ARCHITECTURES="80;90"
+    sed -i 's/set(CMAKE_CUDA_ARCHITECTURES "80;90;121")/set(CMAKE_CUDA_ARCHITECTURES "80;90")/' \
+        src/CMakeLists.txt
     ```
 
-    See the [GPU compute capability table](#cmake_cuda_architectures-gpu-compute-capability) for valid values.
+    Then re-run the CMake configure step. See the [GPU compute capability table](#cmake_cuda_architectures-gpu-compute-capability) for valid values.
 
 ??? failure "Runtime: `EAL: No free hugepages reported`"
 
@@ -356,17 +365,18 @@ The build recipe above is the same on every supported host. The notes below cove
 === "DGX Spark (GB10)"
 
     - The integrated **ConnectX-7** appears in `ibv_devinfo` as one or two `mlx5_*` HCAs depending on link configuration; no separate driver install beyond the [DOCA repository setup](#step-1-configure-the-doca-apt-repository) is needed.
-    - GB10 is **compute capability 12.1** (`sm_121`), which is already part of the hardcoded default `80;90;121` — no `CMAKE_CUDA_ARCHITECTURES` override required, assuming a CUDA Toolkit recent enough to understand `sm_121`.
+    - GB10 is **compute capability 12.1** (`sm_121`), which is already part of the hardcoded default `80;90;121` in `src/CMakeLists.txt:25` — no source edit required, assuming a CUDA Toolkit recent enough to understand `sm_121`.
     - DGX Spark uses **NVLink-C2C unified memory** and has no separate GPU BAR1, so data buffers in YAML configs use `kind: host_pinned` rather than `kind: device`. The DGX-Spark-prefilled YAMLs in `examples/*_spark.yaml` already encode this.
     - `nvidia-peermem` is not used; GPUDirect goes through the dma-buf path enabled by the DPDK patches in [Step 3](#step-3-build-dpdk-with-daqiri-patches).
     - For a runnable end-to-end test after the build completes, follow the [DGX Spark profile callout](benchmarking_examples.md#update-the-loopback-configuration) in Benchmarking Examples — the prefilled `daqiri_bench_raw_tx_rx_spark.yaml` and `daqiri_bench_rdma_tx_rx_spark.yaml` need only an `eth_dst_addr` edit.
 
 === "IGX Orin + dGPU"
 
-    - The reference dGPU is the **RTX 6000 Ada** (compute capability **8.9**). The hardcoded default `80;90;121` does **not** include `89`, so override:
+    - The reference dGPU is the **RTX 6000 Ada** (compute capability **8.9**). The hardcoded default `80;90;121` does **not** include `89`, so edit `src/CMakeLists.txt:25` before configuring (the command-line `-D` override is currently ignored — see the [CMAKE_CUDA_ARCHITECTURES section](#cmake_cuda_architectures-gpu-compute-capability)):
 
         ```bash
-        cmake -S . -B build ... -DCMAKE_CUDA_ARCHITECTURES="89"
+        sed -i 's/set(CMAKE_CUDA_ARCHITECTURES "80;90;121")/set(CMAKE_CUDA_ARCHITECTURES "89")/' \
+            src/CMakeLists.txt
         ```
 
         Use a different value (or extra entries) if you have a different dGPU installed.
@@ -381,10 +391,11 @@ The build recipe above is the same on every supported host. The notes below cove
 === "x86_64 RTX Pro Server"
 
     - "RTX Pro Server" covers any `x86_64` workstation or server with a ConnectX-6 Dx (or later) NIC and an RTX Pro / Workstation GPU. Confirm `nvidia-smi` reports a GPUDirect-capable GPU (any RTX Pro / Quadro / Data Center class card; **not** GeForce — see the warning in [Concepts → GPUDirect](../concepts.md#gpudirect)).
-    - Set `CMAKE_CUDA_ARCHITECTURES` to match the installed card. RTX Pro 6000 Blackwell is `100`; RTX 6000 Ada is `89`; RTX A6000 is `86`:
+    - Edit `src/CMakeLists.txt:25` to match the installed card. RTX Pro 6000 Blackwell is `100`; RTX 6000 Ada is `89`; RTX A6000 is `86`. (The `-DCMAKE_CUDA_ARCHITECTURES=...` command-line override is currently ignored — see the [CMAKE_CUDA_ARCHITECTURES section](#cmake_cuda_architectures-gpu-compute-capability).)
 
         ```bash
-        cmake -S . -B build ... -DCMAKE_CUDA_ARCHITECTURES=100
+        sed -i 's/set(CMAKE_CUDA_ARCHITECTURES "80;90;121")/set(CMAKE_CUDA_ARCHITECTURES "100")/' \
+            src/CMakeLists.txt
         ```
     - x86_64 hosts use `/usr/local/lib/x86_64-linux-gnu/pkgconfig` for the DPDK `.pc` file — that's the default `PKG_CONFIG_PATH` entry shown in [Step 3.4](#34-verify).
     - All other steps are identical to the generic recipe above.
