@@ -272,17 +272,23 @@ ldd /opt/daqiri/lib/libdaqiri.so | head
 
 ### 5.3 Smoke test
 
-The fastest verification needs no physical link and no special hardware — the `sw_loopback` config runs an in-process TX/RX through DPDK's software loopback:
+Verify the build with the standard two-port TX/RX loopback. This requires a NIC with two ports connected to each other by a physical SFP cable, and that you replace the `<angle-bracket>` placeholders in the YAML (PCIe BDFs, CPU cores, destination MAC) for your system. The walkthrough for those edits lives in [Benchmarking Examples → Update the loopback configuration](benchmarking_examples.md#update-the-loopback-configuration); do that first, then run:
 
 ```bash
 sudo ./build/examples/daqiri_bench_raw_gpudirect \
-    ./build/examples/daqiri_bench_raw_sw_loopback.yaml \
+    ./build/examples/daqiri_bench_raw_tx_rx.yaml \
     --seconds 5
 ```
 
-A successful run prints a stream of `[INFO]` lines followed by an RX/TX rate summary. If the program aborts immediately with `EAL: No free hugepages reported`, see [Step 6: Troubleshooting](#step-6-troubleshooting) below.
+A successful run prints a stream of `[INFO]` lines followed by an RX/TX rate summary with non-zero packet counts on both sides. If the program aborts immediately with `EAL: No free hugepages reported`, see [Step 6: Troubleshooting](#step-6-troubleshooting) below.
 
-To run a real two-port loopback over a physical cable, continue with [Benchmarking Examples](benchmarking_examples.md).
+!!! tip "DGX Spark"
+
+    On DGX Spark, use the prefilled `daqiri_bench_raw_tx_rx_spark.yaml` instead — only `eth_dst_addr` needs an edit. See the [DGX Spark profile callout](benchmarking_examples.md#update-the-loopback-configuration) for the exact MAC-lookup command.
+
+!!! note "No NIC available?"
+
+    If you don't have a NIC at all and just want to verify the binary starts cleanly, you can substitute [`daqiri_bench_raw_sw_loopback.yaml`](https://github.com/NVIDIA/daqiri/blob/main/examples/daqiri_bench_raw_sw_loopback.yaml) — it runs an in-process TX/RX through DPDK's software loopback with no hardware required. It is **not** representative of production performance and should not replace the real loopback above for build acceptance.
 
 ## Step 6: Troubleshooting
 
